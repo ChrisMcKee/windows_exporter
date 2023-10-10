@@ -21,6 +21,7 @@ spec:
       labels:
         app: windows-exporter
     spec:
+      serviceAccountName: windows-exporter
       securityContext:
         windowsOptions:
           hostProcess: true
@@ -37,6 +38,11 @@ spec:
         name: windows-exporter
         image: ghcr.io/prometheus-community/windows-exporter:latest
         imagePullPolicy: Always
+        env:
+          - name: NODE_NAME
+            valueFrom:
+              fieldRef:
+                fieldPath: spec.nodeName
         ports:
         - containerPort: 9182
           hostPort: 9182
@@ -62,7 +68,42 @@ metadata:
 data:
   config.yml: |
     collectors:
-      enabled: '[defaults],container'
+      enabled: 'cpu,cs,logical_disk,net,os,system,container,memory'
     collector:
       service:
         services-where: "Name='containerd' or Name='kubelet'"
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: windows-exporter
+  namespace: monitoring
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: windows-exporter
+  namespace: monitoring
+rules:
+  - apiGroups: [""]
+    resources:
+      - nodes/log
+      - nodes/metrics
+      - nodes/proxy
+      - nodes/spec
+      - nodes/stats
+    verbs:
+      - 'get'
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: windows-exporter
+subjects:
+  - kind: ServiceAccount
+    name: windows-exporter
+    namespace: monitoring
+roleRef:
+  kind: ClusterRole
+  name: windows-exporter
+  apiGroup: rbac.authorization.k8s.io
