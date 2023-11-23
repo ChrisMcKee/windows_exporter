@@ -3,7 +3,12 @@
 package container
 
 import (
+	"context"
 	"fmt"
+	"github.com/containerd/containerd"
+	"github.com/containerd/containerd/namespaces"
+	"github.com/docker/docker/client"
+	"os"
 	"strings"
 
 	"github.com/Microsoft/hcsshim"
@@ -55,6 +60,22 @@ type collector struct {
 	WriteSizeBytes       *prometheus.Desc
 }
 
+type ContainerDetails struct {
+	ContainerId   string
+	ContainerName string
+	Namespace     string
+	PodName       string
+	PodID         string
+}
+
+func isKubernetes() bool {
+	// Injected by Kubernetes itself
+	if os.Getenv("KUBERNETES_SERVICE_PORT") != "" && os.Getenv("OS") == "Windows_NT" {
+		return true
+	}
+	return false
+}
+
 // New constructs a new collector
 func New(logger log.Logger, _ *Config) types.Collector {
 	c := &collector{}
@@ -79,10 +100,20 @@ func (c *collector) GetPerfCounter() ([]string, error) {
 }
 
 func (c *collector) Build() error {
+	var tags []string
+	var networkingTags []string
+	if isKubernetes() {
+		tags = []string{"container_id", "container_name", "namespace", "pod_name", "pod_id"}
+		networkingTags = []string{"container_id", "container_name", "namespace", "pod_name", "pod_id", "interface"}
+	} else {
+		tags = []string{"container_id", "container_name"}
+		networkingTags = []string{"container_id", "container_name", "interface"}
+	}
+
 	c.ContainerAvailable = prometheus.NewDesc(
 		prometheus.BuildFQName(types.Namespace, Name, "available"),
 		"Available",
-		[]string{"container_id"},
+		tags,
 		nil,
 	)
 	c.ContainersCount = prometheus.NewDesc(
@@ -94,97 +125,97 @@ func (c *collector) Build() error {
 	c.UsageCommitBytes = prometheus.NewDesc(
 		prometheus.BuildFQName(types.Namespace, Name, "memory_usage_commit_bytes"),
 		"Memory Usage Commit Bytes",
-		[]string{"container_id"},
+		tags,
 		nil,
 	)
 	c.UsageCommitPeakBytes = prometheus.NewDesc(
 		prometheus.BuildFQName(types.Namespace, Name, "memory_usage_commit_peak_bytes"),
 		"Memory Usage Commit Peak Bytes",
-		[]string{"container_id"},
+		tags,
 		nil,
 	)
 	c.UsagePrivateWorkingSetBytes = prometheus.NewDesc(
 		prometheus.BuildFQName(types.Namespace, Name, "memory_usage_private_working_set_bytes"),
 		"Memory Usage Private Working Set Bytes",
-		[]string{"container_id"},
+		tags,
 		nil,
 	)
 	c.RuntimeTotal = prometheus.NewDesc(
 		prometheus.BuildFQName(types.Namespace, Name, "cpu_usage_seconds_total"),
 		"Total Run time in Seconds",
-		[]string{"container_id"},
+		tags,
 		nil,
 	)
 	c.RuntimeUser = prometheus.NewDesc(
 		prometheus.BuildFQName(types.Namespace, Name, "cpu_usage_seconds_usermode"),
 		"Run Time in User mode in Seconds",
-		[]string{"container_id"},
+		tags,
 		nil,
 	)
 	c.RuntimeKernel = prometheus.NewDesc(
 		prometheus.BuildFQName(types.Namespace, Name, "cpu_usage_seconds_kernelmode"),
 		"Run time in Kernel mode in Seconds",
-		[]string{"container_id"},
+		tags,
 		nil,
 	)
 	c.BytesReceived = prometheus.NewDesc(
 		prometheus.BuildFQName(types.Namespace, Name, "network_receive_bytes_total"),
 		"Bytes Received on Interface",
-		[]string{"container_id", "interface"},
+		networkingTags,
 		nil,
 	)
 	c.BytesSent = prometheus.NewDesc(
 		prometheus.BuildFQName(types.Namespace, Name, "network_transmit_bytes_total"),
 		"Bytes Sent on Interface",
-		[]string{"container_id", "interface"},
+		networkingTags,
 		nil,
 	)
 	c.PacketsReceived = prometheus.NewDesc(
 		prometheus.BuildFQName(types.Namespace, Name, "network_receive_packets_total"),
 		"Packets Received on Interface",
-		[]string{"container_id", "interface"},
+		networkingTags,
 		nil,
 	)
 	c.PacketsSent = prometheus.NewDesc(
 		prometheus.BuildFQName(types.Namespace, Name, "network_transmit_packets_total"),
 		"Packets Sent on Interface",
-		[]string{"container_id", "interface"},
+		networkingTags,
 		nil,
 	)
 	c.DroppedPacketsIncoming = prometheus.NewDesc(
 		prometheus.BuildFQName(types.Namespace, Name, "network_receive_packets_dropped_total"),
 		"Dropped Incoming Packets on Interface",
-		[]string{"container_id", "interface"},
+		networkingTags,
 		nil,
 	)
 	c.DroppedPacketsOutgoing = prometheus.NewDesc(
 		prometheus.BuildFQName(types.Namespace, Name, "network_transmit_packets_dropped_total"),
 		"Dropped Outgoing Packets on Interface",
-		[]string{"container_id", "interface"},
+		networkingTags,
 		nil,
 	)
 	c.ReadCountNormalized = prometheus.NewDesc(
 		prometheus.BuildFQName(types.Namespace, Name, "storage_read_count_normalized_total"),
 		"Read Count Normalized",
-		[]string{"container_id"},
+		tags,
 		nil,
 	)
 	c.ReadSizeBytes = prometheus.NewDesc(
 		prometheus.BuildFQName(types.Namespace, Name, "storage_read_size_bytes_total"),
 		"Read Size Bytes",
-		[]string{"container_id"},
+		tags,
 		nil,
 	)
 	c.WriteCountNormalized = prometheus.NewDesc(
 		prometheus.BuildFQName(types.Namespace, Name, "storage_write_count_normalized_total"),
 		"Write Count Normalized",
-		[]string{"container_id"},
+		tags,
 		nil,
 	)
 	c.WriteSizeBytes = prometheus.NewDesc(
 		prometheus.BuildFQName(types.Namespace, Name, "storage_write_size_bytes_total"),
 		"Write Size Bytes",
-		[]string{"container_id"},
+		tags,
 		nil,
 	)
 	return nil
@@ -227,7 +258,7 @@ func (c *collector) collect(ch chan<- prometheus.Metric) (*prometheus.Desc, erro
 		return nil, nil
 	}
 
-	containerPrefixes := make(map[string]string)
+	containerLabelLookup := make(map[string][]string)
 
 	for _, containerDetails := range containers {
 		// https://stackoverflow.com/questions/45617758/proper-way-to-release-resources-with-defer-in-a-loop
@@ -247,74 +278,74 @@ func (c *collector) collect(ch chan<- prometheus.Metric) (*prometheus.Desc, erro
 				return
 			}
 
-			containerIdWithPrefix := getContainerIdWithPrefix(containerDetails)
-			containerPrefixes[containerDetails.ID] = containerIdWithPrefix
+			containerLabels := getContainerLabels(containerDetails.ID, containerDetails.Owner)
+			containerLabelLookup[containerDetails.ID] = containerLabels
 
 			ch <- prometheus.MustNewConstMetric(
 				c.ContainerAvailable,
 				prometheus.CounterValue,
 				1,
-				containerIdWithPrefix,
+				containerLabels...,
 			)
 			ch <- prometheus.MustNewConstMetric(
 				c.UsageCommitBytes,
 				prometheus.GaugeValue,
 				float64(cstats.Memory.UsageCommitBytes),
-				containerIdWithPrefix,
+				containerLabels...,
 			)
 			ch <- prometheus.MustNewConstMetric(
 				c.UsageCommitPeakBytes,
 				prometheus.GaugeValue,
 				float64(cstats.Memory.UsageCommitPeakBytes),
-				containerIdWithPrefix,
+				containerLabels...,
 			)
 			ch <- prometheus.MustNewConstMetric(
 				c.UsagePrivateWorkingSetBytes,
 				prometheus.GaugeValue,
 				float64(cstats.Memory.UsagePrivateWorkingSetBytes),
-				containerIdWithPrefix,
+				containerLabels...,
 			)
 			ch <- prometheus.MustNewConstMetric(
 				c.RuntimeTotal,
 				prometheus.CounterValue,
 				float64(cstats.Processor.TotalRuntime100ns)*perflib.TicksToSecondScaleFactor,
-				containerIdWithPrefix,
+				containerLabels...,
 			)
 			ch <- prometheus.MustNewConstMetric(
 				c.RuntimeUser,
 				prometheus.CounterValue,
 				float64(cstats.Processor.RuntimeUser100ns)*perflib.TicksToSecondScaleFactor,
-				containerIdWithPrefix,
+				containerLabels...,
 			)
 			ch <- prometheus.MustNewConstMetric(
 				c.RuntimeKernel,
 				prometheus.CounterValue,
 				float64(cstats.Processor.RuntimeKernel100ns)*perflib.TicksToSecondScaleFactor,
-				containerIdWithPrefix,
+				containerLabels...,
 			)
 			ch <- prometheus.MustNewConstMetric(
 				c.ReadCountNormalized,
 				prometheus.CounterValue,
 				float64(cstats.Storage.ReadCountNormalized),
-				containerIdWithPrefix,
+				containerLabels...,
 			)
 			ch <- prometheus.MustNewConstMetric(
 				c.ReadSizeBytes,
 				prometheus.CounterValue,
 				float64(cstats.Storage.ReadSizeBytes),
-				containerIdWithPrefix,
+				containerLabels...,
 			)
 			ch <- prometheus.MustNewConstMetric(
 				c.WriteCountNormalized,
 				prometheus.CounterValue,
 				float64(cstats.Storage.WriteCountNormalized),
-				containerIdWithPrefix,
+				containerLabels...,
 			)
 			ch <- prometheus.MustNewConstMetric(
 				c.WriteSizeBytes,
 				prometheus.CounterValue,
 				float64(cstats.Storage.WriteSizeBytes),
-				containerIdWithPrefix,
+				containerLabels...,
 			)
 		}()
 	}
@@ -338,8 +369,9 @@ func (c *collector) collect(ch chan<- prometheus.Metric) (*prometheus.Desc, erro
 		}
 
 		for _, containerId := range endpoint.SharedContainers {
-			containerIdWithPrefix, ok := containerPrefixes[containerId]
-			endpointId := strings.ToUpper(endpoint.Id)
+
+			containerLabels, ok := containerLabelLookup[containerId]
+			endpointLabels := append(containerLabels, strings.ToUpper(endpoint.Id))
 
 			if !ok {
 				_ = level.Warn(c.logger).Log("msg", fmt.Sprintf("Failed to collect network stats for container %s", containerId))
@@ -350,38 +382,38 @@ func (c *collector) collect(ch chan<- prometheus.Metric) (*prometheus.Desc, erro
 				c.BytesReceived,
 				prometheus.CounterValue,
 				float64(endpointStats.BytesReceived),
-				containerIdWithPrefix, endpointId,
+				endpointLabels...,
 			)
 
 			ch <- prometheus.MustNewConstMetric(
 				c.BytesSent,
 				prometheus.CounterValue,
 				float64(endpointStats.BytesSent),
-				containerIdWithPrefix, endpointId,
+				endpointLabels...,
 			)
 			ch <- prometheus.MustNewConstMetric(
 				c.PacketsReceived,
 				prometheus.CounterValue,
 				float64(endpointStats.PacketsReceived),
-				containerIdWithPrefix, endpointId,
+				endpointLabels...,
 			)
 			ch <- prometheus.MustNewConstMetric(
 				c.PacketsSent,
 				prometheus.CounterValue,
 				float64(endpointStats.PacketsSent),
-				containerIdWithPrefix, endpointId,
+				endpointLabels...,
 			)
 			ch <- prometheus.MustNewConstMetric(
 				c.DroppedPacketsIncoming,
 				prometheus.CounterValue,
 				float64(endpointStats.DroppedPacketsIncoming),
-				containerIdWithPrefix, endpointId,
+				endpointLabels...,
 			)
 			ch <- prometheus.MustNewConstMetric(
 				c.DroppedPacketsOutgoing,
 				prometheus.CounterValue,
 				float64(endpointStats.DroppedPacketsOutgoing),
-				containerIdWithPrefix, endpointId,
+				endpointLabels...,
 			)
 		}
 	}
@@ -389,12 +421,98 @@ func (c *collector) collect(ch chan<- prometheus.Metric) (*prometheus.Desc, erro
 	return nil, nil
 }
 
-func getContainerIdWithPrefix(containerDetails hcsshim.ContainerProperties) string {
-	switch containerDetails.Owner {
+func getContainerLabels(containerId string, owner string) []string {
+	var details ContainerDetails
+	var err error
+	switch owner {
 	case "containerd-shim-runhcs-v1.exe":
-		return "containerd://" + containerDetails.ID
+		details, err = getContainerInfoFromContainerD(containerId)
 	default:
 		// default to docker or if owner is not set
-		return "docker://" + containerDetails.ID
+		details, err = getContainerInfoFromDocker(containerId)
 	}
+
+	if err != nil {
+		details = ContainerDetails{
+			ContainerName: "",
+			Namespace:     "",
+			PodName:       "",
+			PodID:         "",
+		}
+	}
+
+	var containerLabels []string
+	if isKubernetes() {
+		containerLabels = []string{
+			details.ContainerId, details.ContainerName, details.Namespace, details.PodName, details.PodID,
+		}
+	} else {
+		containerLabels = []string{
+			details.ContainerId, details.ContainerName,
+		}
+	}
+
+	return containerLabels
+
+}
+
+func getContainerInfoFromDocker(containerID string) (ContainerDetails, error) {
+	// Create a new Docker client
+	cli, err := client.NewClientWithOpts(client.FromEnv, client.WithAPIVersionNegotiation())
+	if err != nil {
+		return ContainerDetails{}, fmt.Errorf("creating Docker client: %w", err)
+	}
+	defer cli.Close()
+
+	// Create a context for the operation
+	ctx := context.Background()
+
+	// Retrieve container details using the Docker client
+	containerJSON, err := cli.ContainerInspect(ctx, containerID)
+	if err != nil {
+		return ContainerDetails{}, fmt.Errorf("inspecting container: %w", err)
+	}
+
+	info := containerJSON.Config.Labels
+
+	details := ContainerDetails{
+		ContainerId:   "docker://" + containerID,
+		ContainerName: info["io.kubernetes.container.name"],
+		Namespace:     info["io.kubernetes.pod.namespace"],
+		PodName:       info["io.kubernetes.pod.name"],
+		PodID:         info["io.kubernetes.pod.uid"],
+	}
+
+	return details, nil
+}
+
+func getContainerInfoFromContainerD(containerID string) (ContainerDetails, error) {
+	// Create a new client connected to the default socket path for containerd.
+	client, err := containerd.New(`\\.\pipe\containerd-containerd`, containerd.WithDefaultNamespace("k8s.io"))
+	if err != nil {
+		return ContainerDetails{}, fmt.Errorf("creating containerd client: %w", err)
+	}
+	defer client.Close()
+
+	// Use the containerd namespace. This is typically "default" but could be
+	// different if you've configured containerd differently.
+	ctx := namespaces.WithNamespace(context.Background(), "k8s.io")
+
+	// Get the container using the provided ID.
+	container, err := client.LoadContainer(ctx, containerID)
+	if err != nil {
+		return ContainerDetails{}, fmt.Errorf("loading container: %w", err)
+	}
+
+	info, _ := container.Info(ctx)
+
+	details := ContainerDetails{
+		ContainerId:   "containerd://" + containerID,
+		ContainerName: info.Labels["io.kubernetes.container.name"],
+		Namespace:     info.Labels["io.kubernetes.pod.namespace"],
+		PodName:       info.Labels["io.kubernetes.pod.name"],
+		PodID:         info.Labels["io.kubernetes.pod.uid"],
+	}
+
+	return details, nil
 }
